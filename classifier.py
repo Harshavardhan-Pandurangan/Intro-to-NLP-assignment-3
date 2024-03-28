@@ -3,12 +3,10 @@ import nltk
 import copy
 import scipy
 import numpy as np
-import sklearn.decomposition
 import tqdm
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
@@ -18,40 +16,37 @@ import time
 # nltk.download('punkt')
 # nltk.download('stopwords')
 
-
 # defining the NewsDataset class
 class NewsDataset(Dataset):
-    def __init__(self, embeddings, labels):
-        # super(NewsDataset, self).__init__()
+    def __init__(self, embeddings, pad_ids, labels):
         self.embeddings = embeddings
+        self.pad_ids = pad_ids
         self.labels = labels
 
     def __len__(self):
         return len(self.embeddings)
 
     def __getitem__(self, idx):
-        embeddings = torch.tensor(self.embeddings[idx], dtype=torch.float32)
-        labels = torch.tensor(self.labels[idx], dtype=torch.float32)
-        return embeddings, labels
-
+        return self.embeddings[idx], self.pad_ids[idx], self.labels[idx]
 
 # defining the Classifier class
 class RNNTrainer:
     # defining the RNN classifier with torch
     class RNN(nn.Module):
         def __init__(self, input_size, hidden_size, output_size):
-            super(RNNTrainer.RNN, self).__init__()
+            super().__init__()
 
             self.hidden_size = hidden_size
             self.rnn = nn.RNN(input_size, hidden_size, batch_first=True)
-            self.fc = nn.Linear(hidden_size, output_size)
-            self.softmax = nn.Softmax(dim=1)
+            self.fc1 = nn.Linear(hidden_size, hidden_size//2)
+            self.fc2 = nn.Linear(hidden_size//2, output_size)
+            self.relu = nn.ReLU()
 
-        def forward(self, x):
-            h0 = torch.zeros(1, x.size(0), self.hidden_size).to(x.device)
-            out, _ = self.rnn(x, h0)
-            out = self.fc(out)
-            out = self.softmax(out)
+        def forward(self, x, ids):
+            out, _ = self.rnn(x)
+            out = self.fc1(out)
+            out = self.relu(out)
+            out = self.fc2(out)
             return out
 
     # defining the constructor
@@ -60,7 +55,7 @@ class RNNTrainer:
         train_data=None,
         test_data=None,
         batch_size=1,
-        embedding_dim=500,
+        embedding_dim=100,
         embedding_type='svd',
         svd_context_size=2,
         hidden_size=128,
@@ -84,10 +79,14 @@ class RNNTrainer:
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        self.train_losses = []
+
         self.prepare_data()
         self.create_model()
-        self.train()
-        # self.test()
+        for epoch in range(self.epochs):
+            print('Epoch: ', epoch+1)
+            self.train()
+            self.test()
         # self.plot_train_loss_acc()
 
     # generating svd embeddings
@@ -108,8 +107,13 @@ class RNNTrainer:
 
         # svd on the co-occurance matrix (limited computation)
         u, s, vt = scipy.sparse.linalg.svds(co_occurance_matrix.astype(np.float64), k=self.embedding_dim)
+        del co_occurance_matrix
 
-        self.embeddings = u
+        # make sure the most important dimensions are first
+        s = s[::-1]
+        u = u[:, ::-1]
+
+        self.embeddings = u @ np.diag(np.sqrt(s))
 
     # generating word2vec embeddings
     def gen_word2vec_embeddings(self):
@@ -120,21 +124,33 @@ class RNNTrainer:
         # tokenising the train data to get the individual words
         train_data_description = [row[1] for row in self.train_data]
         train_data_tokenised = [nltk.word_tokenize(description) for description in train_data_description]
+        test_data_description = [row[1] for row in self.test_data]
+        test_data_tokenised = [nltk.word_tokenize(description) for description in test_data_description]
         # tokenise the words based on '\\' as well
         train_data_tokenised = [[word.split('\\') for word in description] for description in train_data_tokenised]
+        test_data_tokenised = [[word.split('\\') for word in description] for description in test_data_tokenised]
 
         # print all the elements in the list within the tokenised list
         train_data_temp = copy.deepcopy(train_data_tokenised)
+        test_data_temp = copy.deepcopy(test_data_tokenised)
         train_data_tokenised = []
+        test_data_tokenised = []
         for description in train_data_temp:
             train_data_tokenised.append([])
             for words in description:
                 for word in words:
                     if word != '':
                         train_data_tokenised[-1].append(word)
+        for description in test_data_temp:
+            test_data_tokenised.append([])
+            for words in description:
+                for word in words:
+                    if word != '':
+                        test_data_tokenised[-1].append(word)
 
         # convert all the words to lower case
         self.train_data_tokenised = [[word.lower() for word in description] for description in train_data_tokenised]
+        self.test_data_tokenised = [[word.lower() for word in description] for description in test_data_tokenised]
 
         # making the co-occurance matrix for the words
         vocab = list(set([word for description in self.train_data_tokenised for word in description]))
@@ -154,14 +170,37 @@ class RNNTrainer:
             print('Invalid embedding type')
             return
 
-        self.train_data_x = [[[]] for _ in range(len(self.train_data))]
-        self.test_data_x = [[[]] for _ in range(len(self.test_data))]
-        for i in range(len(self.train_data_tokenised)):
-            for j in range(len(self.train_data_tokenised[i])):
-                self.train_data_x[i][0].append(self.embeddings[self.word_index[self.train_data_tokenised[i][j]]])
-        for i in range(len(self.test_data)):
-            for j in range(len(self.train_data_tokenised[i])):
-                self.test_data_x[i][0].append(self.embeddings[self.word_index[self.train_data_tokenised[i][j]]])
+        # replace all the words not in the vocab with <oov>
+        for i in range(len(self.test_data_tokenised)):
+            for j in range(len(self.test_data_tokenised[i])):
+                if self.test_data_tokenised[i][j] not in self.word_index:
+                    self.test_data_tokenised[i][j] = '<oov>'
+
+        # convert the tokenised data to embeddings
+        self.train_data_x = []
+        for description in self.train_data_tokenised:
+            embeddings = [self.embeddings[self.word_index[word]] for word in description]
+            self.train_data_x.append(embeddings)
+        self.test_data_x = []
+        for description in self.test_data_tokenised:
+            embeddings = [self.embeddings[self.word_index[word]] for word in description]
+            self.test_data_x.append(embeddings)
+
+        # find the lengths of all the sequences
+        self.train_data_x_lens = [len(description) for description in self.train_data_tokenised]
+        self.test_data_x_lens = [len(description) for description in self.test_data_tokenised]
+        # find the 95th percentile of the lengths
+        self.train_data_x_len = np.percentile(self.train_data_x_lens, 90)
+        self.test_data_x_len = np.percentile(self.test_data_x_lens, 90)
+        # pad the sequence
+        self.train_data_x = nn.utils.rnn.pad_sequence([torch.tensor(np.array(embeddings), dtype=torch.float32) for embeddings in self.train_data_x], batch_first=True, padding_value=0)
+        self.test_data_x = nn.utils.rnn.pad_sequence([torch.tensor(np.array(embeddings), dtype=torch.float32) for embeddings in self.test_data_x], batch_first=True, padding_value=0)
+        # trim the sequences to the 90th percentile length
+        self.train_data_x = self.train_data_x[:, :int(self.train_data_x_len)]
+        self.test_data_x = self.test_data_x[:, :int(self.test_data_x_len)]
+        # reduce lens to the truncated length
+        self.train_data_x_lens = [min(self.train_data_x_lens[i], int(self.train_data_x_len)) for i in range(len(self.train_data_x_lens))]
+        self.test_data_x_lens = [min(self.test_data_x_lens[i], int(self.test_data_x_len)) for i in range(len(self.test_data_x_lens))]
 
         train_labels = [row[0] for row in self.train_data]
 
@@ -178,8 +217,8 @@ class RNNTrainer:
         self.train_data_y = labels_onehot_train
         self.test_data_y = labels_onehot_test
 
-        self.train_dataset = self.dataset(self.train_data_x, self.train_data_y)
-        self.test_dataset = self.dataset(self.test_data_x, self.test_data_y)
+        self.train_dataset = NewsDataset(self.train_data_x, self.train_data_x_lens, self.train_data_y)
+        self.test_dataset = NewsDataset(self.test_data_x, self.test_data_x_lens, self.test_data_y)
 
         self.train_loader = DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=2)
         self.test_loader = DataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=True, num_workers=2)
@@ -193,31 +232,27 @@ class RNNTrainer:
         self.model.train()
         self.train_loss = []
         self.train_accuracy = []
-        print('Training model')
-        for epoch in range(self.epochs):
-            running_loss = 0.0
-            correct = 0
-            total = 0
-            for i, data in enumerate(tqdm.tqdm(self.train_loader)):
-                print(len(data))
-                continue
-                inputs, labels = data
-                inputs, labels = inputs.to(self.device), labels.to(self.device)
-                self.optimizer.zero_grad()
-                # print(len(inputs))
-                # print(type(inputs[0]))
-                # print(inputs[0].shape)
-                outputs = self.model(inputs)
-                loss = self.criterion(outputs, torch.argmax(labels, dim=1))
-                loss.backward()
-                self.optimizer.step()
+        running_loss = 0.0
+        correct = 0
+        total = 0
+        for i, data in enumerate(tqdm.tqdm(self.train_loader)):
+            inputs, ids, labels = data
+            inputs, labels = inputs.to(self.device), labels.to(self.device)
+            self.optimizer.zero_grad()
+            outputs = self.model(inputs, ids)
+            # sum the outputs
+            outputs = torch.sum(outputs, dim=1)
+            loss = self.criterion(outputs, labels)
+            loss.backward()
+            self.optimizer.step()
 
-                running_loss += loss.item()
-                total += labels.size(0)
-                correct += (torch.argmax(outputs, dim=1) == torch.argmax(labels, dim=1)).sum().item()
+            running_loss += loss.item()
+            total += labels.size(0)
+            correct += (torch.argmax(outputs, dim=1) == torch.argmax(labels, dim=1)).sum().item()
+            self.train_losses.append(loss.item())
 
-            self.train_loss.append(running_loss)
-            self.train_accuracy.append(correct/total)
+        self.train_loss.append(running_loss)
+        self.train_accuracy.append(correct/total)
 
         print('Training Loss: ', self.train_loss[-1])
         print('Training Accuracy: ', self.train_accuracy[-1])
@@ -228,21 +263,21 @@ class RNNTrainer:
         total = 0
         with torch.no_grad():
             for data in self.test_loader:
-                inputs, labels = data
+                inputs, ids, labels = data
                 inputs, labels = inputs.to(self.device), labels.to(self.device)
-
-                outputs = self.model(inputs)
+                outputs = self.model(inputs, ids)
+                outputs = torch.sum(outputs, dim=1)
                 total += labels.size(0)
                 correct += (torch.argmax(outputs, dim=1) == torch.argmax(labels, dim=1)).sum().item()
 
-        self.test_accuracy = correct/total
-        print('Test Accuracy: ', self.test_accuracy)
+        print('Test Accuracy: ', correct/total)
 
     def plot_train_loss_acc(self):
         plt.figure()
-        plt.plot(self.train_loss, label='Train Loss')
-        plt.plot(self.train_accuracy, label='Train Accuracy')
-        plt.xlabel('Epochs')
+        plt.plot(self.train_losses, label='Train Loss')
+        plt.xlabel('Iterations')
+        plt.ylabel('Loss')
+        plt.title('Train Loss')
         plt.legend()
         plt.show()
 
@@ -252,6 +287,7 @@ class RNNTrainer:
     def load_model(self):
         pass
 
+# main function
 if __name__ == "__main__":
     # load the data
     train_data_path = './Data/train.csv'
@@ -271,11 +307,11 @@ if __name__ == "__main__":
     params = {
         'train_data':train_data,
         'test_data':test_data,
-        'batch_size':32,
-        'embedding_dim':500,
+        'batch_size':128,
+        'embedding_dim':200,
         'embedding_type':'svd',
-        'svd_context_size':2,
-        'hidden_size':128
+        'svd_context_size':3,
+        'hidden_size':256
     }
 
     rnn_trainer = RNNTrainer(**params)
