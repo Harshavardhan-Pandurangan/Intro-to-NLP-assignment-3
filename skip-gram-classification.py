@@ -90,7 +90,7 @@ class RNNTrainer:
         self.name = run_name
 
         if self.logging:
-            wandb.init(project='news-classification', entity='rockingharsha71', name=self.name, reinit=True)
+            wandb.init(project='news-classification-2', entity='rockingharsha71', name=self.name, reinit=True)
             wandb.config.update({
                 'embedding_type': self.embedding_type,
                 'embedding_dim': self.embedding_dim,
@@ -447,17 +447,17 @@ if __name__ == "__main__":
         'batch_size':512,
         'embedding_dim':200,
         'embedding_type':'word2vec',
-        'context_size':3,
+        'context_size':4,
         'hidden_size':256,
         'epochs':15,
         'save_embeddings':False,
         # 'load_embeddings':False, # always set the opposite of 'train_embeddings'
         'embeddings_path':'skip-gram-word-vectors.pt', # not none if 'load_embeddings' or 'save_embeddings' is True
-        'save_model':False,
+        'save_model':True,
         'load_model':False,
         'model_path':'skip-gram-classification-model.pt', # not none if 'load_model' or 'save_model' is True
-        'logging':True,
-        'run_name':'skip_gram_200_3_256_2' # name of the run better be unique
+        'logging':False,
+        'run_name':'skip_gram_200_4_256' # name of the run better be unique
     }
 
     rnn_trainer = RNNTrainer(**params)
