@@ -3,8 +3,6 @@ import nltk
 import copy
 import scipy
 import numpy as np
-from collections import Counter
-import random
 import tqdm
 import torch
 import torch.nn as nn
@@ -55,16 +53,12 @@ class RNNTrainer:
         self,
         train_data=None,
         test_data=None,
-        train_embeddings=True,
-        train_model=True,
-        batch_size=512,
+        batch_size=1,
         embedding_dim=100,
         embedding_type='svd',
         context_size=2,
         hidden_size=128,
         epochs=10,
-        save_embeddings=False,
-        embeddings_path=None,
         save_model=False,
         load_model=False,
         model_path=None,
@@ -73,16 +67,12 @@ class RNNTrainer:
 
         self.train_data = train_data
         self.test_data = test_data
-        self.train_embeddings = train_embeddings
-        self.train_model = train_model
         self.batch_size = batch_size
         self.embedding_dim = embedding_dim
         self.embedding_type = embedding_type
         self.context_size = context_size
         self.hidden_size = hidden_size
         self.epochs = epochs
-        self.save_embeddings = save_embeddings
-        self.embeddings_path = embeddings_path
         self.save_model = save_model
         self.load_model = load_model
         self.model_path = model_path
@@ -102,34 +92,26 @@ class RNNTrainer:
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        self.train_losses = []
+        self.train_accuracies = []
+        self.test_losses = []
+        self.test_accuracies = []
+
         self.prepare_data()
-        if self.save_embeddings:
-            self.save_embeddings_()
-
-        if self.train_model:
-            self.train_losses = []
-            self.train_accuracies = []
-            self.test_losses = []
-            self.test_accuracies = []
-
-            self.create_model()
-            for epoch in range(self.epochs):
-                print('Epoch: ', epoch+1)
-                self.train()
-                self.test()
-                if self.logging:
-                    wandb.log({
-                        'train_loss': self.train_losses[-1],
-                        'train_accuracy': self.train_accuracies[-1],
-                        'test_loss': self.test_losses[-1],
-                        'test_accuracy': self.test_accuracies[-1]
-                    })
-            if self.logging:
-                wandb.finish()
-            print('Training Complete')
-
-            if self.save_model:
-                self.save_model_()
+        self.create_model()
+        for epoch in range(self.epochs):
+            print('Epoch: ', epoch+1)
+            self.train()
+            self.test()
+            wandb.log({
+                'train_loss': self.train_losses[-1],
+                'train_accuracy': self.train_accuracies[-1],
+                'test_loss': self.test_losses[-1],
+                'test_accuracy': self.test_accuracies[-1]
+            })
+        wandb.finish()
+        print('Training Complete')
+        # self.plot_train_loss_acc()
 
     # generating svd embeddings
     def gen_svd_embeddings(self):
@@ -157,62 +139,9 @@ class RNNTrainer:
 
         self.embeddings = u @ np.diag(np.sqrt(s))
 
+    # generating word2vec embeddings
     def gen_word2vec_embeddings(self):
-        # making the co-occurance matrix for the words
-        co_occurance_matrix = scipy.sparse.lil_matrix((self.vocab_size, self.vocab_size))
-
-        # make the co-occurance matrix using the window size of 2
-        window_size = self.context_size
-        for description in tqdm.tqdm(self.train_data_tokenised):
-            for i in range(len(description)):
-                for j in range(i+1, min(i+window_size, len(description))):
-                    a,b = self.word_index[description[i]], self.word_index[description[j]]
-                    co_occurance_matrix[a,b] += 1
-                    co_occurance_matrix[b,a] += 1
-
-        co_occurance_matrix = co_occurance_matrix.tocsr()
-
-        # making lists for positive and negative samples
-        pos_samples = []
-        neg_samples = []
-        for i in range(self.vocab_size):
-            # non-zero elements in the row
-            positive_samples = co_occurance_matrix[i].nonzero()[1]
-            pos_samples.append(positive_samples)
-            # negative samples that are not in the positive samples
-            negative_samples = np.random.choice(np.setdiff1d(np.arange(self.vocab_size), positive_samples), size=5)
-            neg_samples.append(negative_samples)
-
-        # define the C and W matrices
-        self.C = torch.randn((self.vocab_size, self.embedding_dim)).to(self.device)
-        self.W = torch.randn((self.vocab_size, self.embedding_dim)).to(self.device)
-
-        # training the model
-        for epoch in range(5):
-            print('Epoch: ', epoch+1)
-            running_loss = 0.0
-            # for i in range(tqdm.tqdm(self.vocab_size)):
-            for i in tqdm.tqdm(range(self.vocab_size)):
-                upd_weights = torch.zeros(self.embedding_dim).to(self.device)
-                for pos_idx in pos_samples[i]:
-                    c_pos_weights = torch.dot(self.W[i], self.C[pos_idx])
-                    sig_c_pos_weights = torch.sigmoid(c_pos_weights)
-                    val = (sig_c_pos_weights - 1) * 0.01
-                    self.C[pos_idx] -= val * self.W[i]
-                    upd_weights += val * self.C[pos_idx]
-
-                for neg_idx in neg_samples[i]:
-                    c_neg_weights = torch.dot(self.W[i], self.C[neg_idx])
-                    sig_c_neg_weights = torch.sigmoid(c_neg_weights)
-                    val = sig_c_neg_weights * 0.01
-                    self.C[neg_idx] -= val * self.W[i]
-                    upd_weights += val * self.C[neg_idx]
-
-                self.W[i] -= upd_weights * 0.01
-                running_loss += torch.sum(upd_weights ** 2)
-            print('Loss: ', running_loss)
-
-        self.embeddings = self.W.cpu().numpy() + self.C.cpu().numpy()
+        pass
 
     # function to generate embeddings and initialise the dataset and dataloader
     def prepare_data(self):
@@ -257,33 +186,13 @@ class RNNTrainer:
         # make a dictionary for the words and their index
         self.word_index = {word: i for i, word in enumerate(self.vocab)}
 
-        if self.train_embeddings:
-            if self.embedding_type == 'svd':
-                self.gen_svd_embeddings()
-            elif self.embedding_type == 'word2vec':
-                self.gen_word2vec_embeddings()
-            else:
-                print('Invalid embedding type')
-                return
+        if self.embedding_type == 'svd':
+            self.gen_svd_embeddings()
+        elif self.embedding_type == 'word2vec':
+            self.gen_word2vec_embeddings()
         else:
-            # load the embeddings which is a dictionary
-            embeddings = torch.load(self.embeddings_path)
-            vocab = list(embeddings.keys())
-            self.vocab = sorted(vocab)
-            self.vocab_size = len(vocab)
-            self.embeddings = np.array([embeddings[word] for word in self.vocab])
-            self.word_index = {word: i for i, word in enumerate(self.vocab)}
-
-        if self.save_embeddings:
-            # make a dictionary for the words and their embeddings
-            self.word_embeddings = {word: self.embeddings[self.word_index[word]] for word in self.vocab}
-            torch.save(self.word_embeddings, self.embeddings_path)
-            print('Embeddings saved to ', self.embeddings_path)
-
-        for i in range(len(self.train_data_tokenised)):
-            for j in range(len(self.train_data_tokenised[i])):
-                if self.train_data_tokenised[i][j] not in self.word_index:
-                    self.train_data_tokenised[i][j] = '<oov>'
+            print('Invalid embedding type')
+            return
 
         # replace all the words not in the vocab with <oov>
         for i in range(len(self.test_data_tokenised)):
@@ -407,16 +316,10 @@ class RNNTrainer:
         plt.legend()
         plt.show()
 
-    def save_embeddings_(self):
+    def save_model(self):
         pass
 
-    def load_embeddings_(self):
-        pass
-
-    def save_model_(self):
-        pass
-
-    def load_model_(self):
+    def load_model(self):
         pass
 
 # main function
@@ -436,25 +339,74 @@ if __name__ == "__main__":
         test_data = list(reader)
         test_data = test_data[1:] # remove header
 
-    params = {
-        'train_data':train_data,
-        'test_data':test_data,
-        'train_embeddings':False,
-        'train_model':True,
-        'batch_size':512,
-        'embedding_dim':200,
-        'embedding_type':'word2vec',
-        'context_size':2,
-        'hidden_size':256,
-        'epochs':15,
-        'save_embeddings':False,
-        # 'load_embeddings':False, # always set the opposite of 'train_embeddings'
-        'embeddings_path':'skip-gram-word-vectors.pt', # not none if 'load_embeddings' or 'save_embeddings' is True
-        'save_model':False,
-        'load_model':False,
-        'model_path':None, # not none if 'load_model' or 'save_model' is True
-        'logging':False,
-        'run_name':'svd_200_6_256' # name of the run better be unique
-    }
+    # params = {
+    #     'train_data':train_data,
+    #     'test_data':test_data,
+    #     'batch_size':512,
+    #     'embedding_dim':200,
+    #     'embedding_type':'svd',
+    #     'context_size':6,
+    #     'hidden_size':256,
+    #     'epochs':15,
+    #     'logging':True,
+    #     'run_name':'svd_200_6_256'
+    # }
 
-    rnn_trainer = RNNTrainer(**params)
+    # rnn_trainer = RNNTrainer(**params)
+
+    train_losses = []
+    train_accuracies = []
+    test_losses = []
+    test_accuracies = []
+    for context_size in [2, 4, 6, 8]:
+        context_train_losses = []
+        context_train_accuracies = []
+        context_test_losses = []
+        context_test_accuracies = []
+        for i in range(5):
+            params = {
+                'train_data':train_data,
+                'test_data':test_data,
+                'batch_size':512,
+                'embedding_dim':200,
+                'embedding_type':'svd',
+                'context_size':context_size,
+                'hidden_size':256,
+                'epochs':15,
+                'logging':True,
+                'run_name':f'svd_200_{context_size}_256_{i}'
+            }
+
+            rnn_trainer = RNNTrainer(**params)
+            context_train_losses.append(rnn_trainer.train_losses)
+            context_train_accuracies.append(rnn_trainer.train_accuracies)
+            context_test_losses.append(rnn_trainer.test_losses)
+            context_test_accuracies.append(rnn_trainer.test_accuracies)
+            del rnn_trainer
+
+        context_train_losses = np.array(context_train_losses)
+        context_train_accuracies = np.array(context_train_accuracies)
+        context_test_losses = np.array(context_test_losses)
+        context_test_accuracies = np.array(context_test_accuracies)
+
+        print(context_train_losses.shape)
+        print(context_train_accuracies.shape)
+        print(context_test_losses.shape)
+        print(context_test_accuracies.shape)
+
+        train_losses.append(context_train_losses)
+        train_accuracies.append(context_train_accuracies)
+        test_losses.append(context_test_losses)
+        test_accuracies.append(context_test_accuracies)
+
+    train_losses = np.array(train_losses)
+    train_accuracies = np.array(train_accuracies)
+    test_losses = np.array(test_losses)
+    test_accuracies = np.array(test_accuracies)
+
+    # save the losses and accuracies
+    np.save('./Data/train_loss.npy', train_losses)
+    np.save('./Data/train_acc.npy', train_accuracies)
+    np.save('./Data/test_loss.npy', test_losses)
+    np.save('./Data/test_acc.npy', test_accuracies)
+    print('Data saved')

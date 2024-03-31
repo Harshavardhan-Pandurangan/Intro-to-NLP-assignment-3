@@ -1,0 +1,10 @@
+SkipGram_NegativeSampling.ipynb
+Data/train_losses.npy
+Data/train_loss.npy
+Data/train_accuracies.npy
+Data/train_acc.npy
+Data/test_losses.npy
+Data/test_loss.npy
+Data/test_accuracies.npy
+Data/test_acc.npy
+analysis.ipynb
