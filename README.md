@@ -1,4 +1,4 @@
-# NLP Assignment 1 - POS Tagging
+# NLP Assignment 3 - SVD and SkipGram-Word2vec Word Embedding Generation
 ## Harshavardhan P - 2021111003
 
 <br>
